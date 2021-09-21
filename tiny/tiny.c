@@ -31,8 +31,8 @@ int main(int argc, char **argv) {
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
-    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);  // line:netp:tiny:accept
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+    connfd = Accept(listenfd, (SA *) &clientaddr, &clientlen);  // line:netp:tiny:accept
+    Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
     printf("Accepted connection from (%s, %s)\n", hostname, port);
     doit(connfd);   // line:netp:tiny:doit
     Close(connfd);  // line:netp:tiny:close
@@ -57,7 +57,7 @@ void doit(int fd) {
   printf("%s", buf);  // "GET / HTTP/1.1"
 
   // 버퍼에서 자료형을 읽음. 요청 라인을 분석함.
-  sscanf(buf, "%s, %s, %s", method, uri, version);
+  sscanf(buf, "%s %s %s", method, uri, version);
   
   // strcasecmp: 두 문자열의 길이와 내용이 같을 때 0 반환
   if (strcasecmp(method, "GET")) {
@@ -229,6 +229,8 @@ void get_filetype(char *filename, char *filetype) {
     strcpy(filetype, "image/png");
   else if (strstr(filename, ".jpg"))
     strcpy(filetype, "image/jpeg");
+  else if (strstr(filename, ".mp4"))
+    strcpy(filetype, "video/mp4");
   else
     strcpy(filetype, "text/plain");
 }
