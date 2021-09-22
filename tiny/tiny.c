@@ -157,7 +157,8 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
     } else
       strcpy(cgiargs, "");
     strcpy(filename, ".");  // 나머지 URI 부분을 상대 리눅스 파일 이름으로 변환
-    strcat(filename, uri);  // ./uri
+    strcat(filename, uri);  // ./uri  =  ./cgi-bin/adder
+    printf("1111111111 filename: %s\n", filename);
     return 0;
   }
 }
@@ -204,7 +205,9 @@ void serve_static(int fd, char *filename, int filesize) {
   // 변경된 메모리 속성은 실제 파일에는 반영되지 않음.
   // 다섯 번째 fd: 파일 식별자
   // 여섯 번째 offset: 맵핑할 때 len의 시작점을 지정
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);  // 숙제 11.9를 위해 주석 처리
+  srcp = (char *)Malloc(filesize);
+  Rio_readn(srcfd, srcp, filesize);  // rio_readn(파일 식별자, 저장할 버퍼, 저장할 버퍼 크기): fd의 현재 파일 위치에서 메모리 위치 버퍼로 최대 n 바이트 전송
 
   // 파일을 메모리로 매핑한 후에 더 이상 이 식별자는 필요없어서 닫음.
   Close(srcfd);
@@ -216,7 +219,8 @@ void serve_static(int fd, char *filename, int filesize) {
 
   // 매핑된 가상메모리 주소 반환. 이것은 치명적일 수 있는 메모리 누수를 피하는 데 중요.
   // munmap: mmap으로 만들어진 맵핑을 제거하기 위한 시스템 호출.
-  Munmap(srcp, filesize);
+  // Munmap(srcp, filesize);
+  free(srcp);
 }
 
 // Derive file type from filename
@@ -261,6 +265,10 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
     // execve: 실행가능한 파일인 filename의 실행코드를 현재 프로세스에 적재하여
     // 기존의 실행코드와 교체하여 새로운 기능으로 실행. 즉, 현재 실행되는 프로그램의
     // 기능은 없어지고 filename 프로그램을 메모리에 loading하여 처음부터 실행
+    // 첫 번째 인자 filename: 교체할 실행 파일
+    // 두 번째 인자 argv
+    // 세 번째 인자 envp: key=value 형식의 환경변수 문자열 배열리스트.
+    // 기 설정된 환경변수를 사용하려면 environ 전역변수 사용
     Execve(filename, empty_list, environ);  // Run CGI Program
     // CGI 프로그램이 자식 컨텍스트에서 실행되기 때문에 execve 함수를 호출하기 전에
     // 존재하던 열린 파일들과 환경변수들에도 동일하게 접근 가능. 그래서 CGI 프로그램이
