@@ -11,10 +11,10 @@
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, char *method);
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method);
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg, char *method);
 
 int main(int argc, char **argv) {
   int listenfd, connfd;  // fd: 파일 또는 소켓을 지칭하기 위해 부여한 숫자
@@ -60,8 +60,8 @@ void doit(int fd) {
   sscanf(buf, "%s %s %s", method, uri, version);
   
   // strcasecmp: 두 문자열의 길이와 내용이 같을 때 0 반환
-  if (strcasecmp(method, "GET")) {
-    clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method");
+  if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {
+    clienterror(fd, method, "501", "Not implemented", "Tiny does not implement this method", method);
     return;
   }
   read_requesthdrs(&rio);  // 요청 헤더를 읽는 함수
@@ -74,7 +74,7 @@ void doit(int fd) {
   
   // stat: 파일 정보를 불러오고 sbuf에 내용을 적어줌. ok: 0 / error: -1
   if (stat(filename, &sbuf) < 0) {
-    clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
+    clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file", method);
     return;
   }
 
@@ -82,20 +82,20 @@ void doit(int fd) {
   // S_ISREG: 일반 파일인가?
   // 파일 접근 권한 비트 S_IRUSR: 읽기 권한이 있나? / S_IXUSR: 실행 권한이 있나?
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
-      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file");
+      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't read the file", method);
       return;
     }
-    serve_static(fd, filename, sbuf.st_size);
+    serve_static(fd, filename, sbuf.st_size, method);
   } else {  // Serve dynamic content
     if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
-      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program");
+      clienterror(fd, filename, "403", "Forbidden", "Tiny couldn't run the CGI program", method);
       return;
     }
-    serve_dynamic(fd, filename, cgiargs);
+    serve_dynamic(fd, filename, cgiargs, method);
   }
 }
 
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg) {
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg, char *method) {
   char buf[MAXLINE], body[MAXLINE];
 
   // Build the HTTP response body
@@ -115,7 +115,8 @@ void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longms
   Rio_writen(fd, buf, strlen(buf));
   sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
   Rio_writen(fd, buf, strlen(buf));
-  Rio_writen(fd, body, strlen(body));
+  if (!strcasecmp(method, "GET"))
+    Rio_writen(fd, body, strlen(body));
 }
 
 void read_requesthdrs(rio_t *rp) {  // 요청 헤더 왜 무시? -> 필요한 정보 있으면 무시x
@@ -164,7 +165,7 @@ int parse_uri(char *uri, char *filename, char *cgiargs) {
 }
 
 // fd: 응답받는 소켓(연결식별자)
-void serve_static(int fd, char *filename, int filesize) {
+void serve_static(int fd, char *filename, int filesize, char *method) {
   int srcfd;
   char *srcp, filetype[MAXLINE], buf[MAXBUF];
   
@@ -179,7 +180,7 @@ void serve_static(int fd, char *filename, int filesize) {
   sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
   sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
 
-  // 요청한 파일의 내용을 연결 식별자 fd로 복사해서 응답 본체 보냄.
+  // 요청한 파일의 내용을 연결 식별자 fd로 복사해서 응답 헤더 보냄.
   Rio_writen(fd, buf, strlen(buf));
 
   // 서버에 출력
@@ -190,37 +191,39 @@ void serve_static(int fd, char *filename, int filesize) {
   // 읽기 위해서 filename을 오픈하고 식별자를 얻어옴.
   // O_RDONLY: 읽기 전용으로 열기
   // 0: 접근 권한
-  srcfd = Open(filename, O_RDONLY, 0);
+  if (!strcasecmp(method, "GET")) {
+    srcfd = Open(filename, O_RDONLY, 0);
 
-  // 리눅스 mmap 함수는 요청한 파일을 가상메모리 영역으로 매핑
-  // mmap을 호출하면 파일 srcfd의 첫 번째 filesize 바이트 주소를 srcp에서 시작하는
-  // 사적 읽기-허용 가상메모리 영역으로 매핑
-  // mmap: 맵핑이 시작하는 실제 메모리 주소 리턴
-  // 첫 번째 인자 *addr: 커널에게 파일을 어디에 맵핑하면 좋을지 제안하는 값
-  // 두 번째 len: 맵핑시킬 메모리 영역의 길이
-  // 세 번째 prot: 맵핑에 원하는 메모리 보호 정책
-  // PROT_READ: 읽기 가능한 페이지 (읽기 전용)
-  // 네 번째 flags: 맵핑 유형과 동작 구성 요소
-  // MAP_PRIVATE: 맵핑을 공유하지 않아, 파일은 쓰기 후 복사로 맵핑되며,
-  // 변경된 메모리 속성은 실제 파일에는 반영되지 않음.
-  // 다섯 번째 fd: 파일 식별자
-  // 여섯 번째 offset: 맵핑할 때 len의 시작점을 지정
-  // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);  // 숙제 11.9를 위해 주석 처리
-  srcp = (char *)Malloc(filesize);
-  Rio_readn(srcfd, srcp, filesize);  // rio_readn(파일 식별자, 저장할 버퍼, 저장할 버퍼 크기): fd의 현재 파일 위치에서 메모리 위치 버퍼로 최대 n 바이트 전송
+    // 리눅스 mmap 함수는 요청한 파일을 가상메모리 영역으로 매핑
+    // mmap을 호출하면 파일 srcfd의 첫 번째 filesize 바이트 주소를 srcp에서 시작하는
+    // 사적 읽기-허용 가상메모리 영역으로 매핑
+    // mmap: 맵핑이 시작하는 실제 메모리 주소 리턴
+    // 첫 번째 인자 *addr: 커널에게 파일을 어디에 맵핑하면 좋을지 제안하는 값
+    // 두 번째 len: 맵핑시킬 메모리 영역의 길이
+    // 세 번째 prot: 맵핑에 원하는 메모리 보호 정책
+    // PROT_READ: 읽기 가능한 페이지 (읽기 전용)
+    // 네 번째 flags: 맵핑 유형과 동작 구성 요소
+    // MAP_PRIVATE: 맵핑을 공유하지 않아, 파일은 쓰기 후 복사로 맵핑되며,
+    // 변경된 메모리 속성은 실제 파일에는 반영되지 않음.
+    // 다섯 번째 fd: 파일 식별자
+    // 여섯 번째 offset: 맵핑할 때 len의 시작점을 지정
+    // srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);  // 숙제 11.9를 위해 주석 처리
+    srcp = (char *)Malloc(filesize);
+    Rio_readn(srcfd, srcp, filesize);  // rio_readn(파일 식별자, 저장할 버퍼, 저장할 버퍼 크기): fd의 현재 파일 위치에서 메모리 위치 버퍼로 최대 n 바이트 전송
 
-  // 파일을 메모리로 매핑한 후에 더 이상 이 식별자는 필요없어서 닫음.
-  Close(srcfd);
-  // 이렇게 하지 않으면 치명적인 메모리 누수 발생 가능
+    // 파일을 메모리로 매핑한 후에 더 이상 이 식별자는 필요없어서 닫음.
+    Close(srcfd);
+    // 이렇게 하지 않으면 치명적인 메모리 누수 발생 가능
 
-  // rio_writen 함수는 주소 srcp에서 시작하는 filesize 바이트(물론, 이것은 요청한
-  // 파일에 매핑되어 있음)를 클라이언트의 연결 식별자로 복사
-  Rio_writen(fd, srcp, filesize);
+    // rio_writen 함수는 주소 srcp에서 시작하는 filesize 바이트(물론, 이것은 요청한
+    // 파일에 매핑되어 있음)를 클라이언트의 연결 식별자로 복사
+    Rio_writen(fd, srcp, filesize);
 
-  // 매핑된 가상메모리 주소 반환. 이것은 치명적일 수 있는 메모리 누수를 피하는 데 중요.
-  // munmap: mmap으로 만들어진 맵핑을 제거하기 위한 시스템 호출.
-  // Munmap(srcp, filesize);
-  free(srcp);
+    // 매핑된 가상메모리 주소 반환. 이것은 치명적일 수 있는 메모리 누수를 피하는 데 중요.
+    // munmap: mmap으로 만들어진 맵핑을 제거하기 위한 시스템 호출.
+    // Munmap(srcp, filesize);
+    free(srcp);
+  }
 }
 
 // Derive file type from filename
@@ -239,7 +242,7 @@ void get_filetype(char *filename, char *filetype) {
     strcpy(filetype, "text/plain");
 }
 
-void serve_dynamic(int fd, char *filename, char *cgiargs) {
+void serve_dynamic(int fd, char *filename, char *cgiargs, char *method) {
   char buf[MAXLINE], *empty_list[] = {NULL};
 
   // Return first part of HTTP response
@@ -257,6 +260,7 @@ void serve_dynamic(int fd, char *filename, char *cgiargs) {
     // 자식은 QUERY_STRING 환경변수를 요청 URI의 CGI 인자들로 초기화함.
     // setenv 세 번째 인자 overwrite: 이미 같은 이름의 변수가 있다면 값을 변경할지
     setenv("QUERY_STRING", cgiargs, 1);
+    setenv("REQUEST_METHOD", method, 1);
 
     // 자식은 자식의 표준 출력을 연결 파일 식별자로 재지정
     Dup2(fd, STDOUT_FILENO);  // Redirect stdout to client
