@@ -4,11 +4,6 @@
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
-#define LRU_MAGIC_NUMBER 9999
-// Least Recently Used
-// LRU: 가장 오랫동안 참조되지 않은 페이지를 교체하는 기법
-
-#define CACHE_OBJS_COUNT 10
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr =
@@ -31,36 +26,6 @@ void parse_uri(char *uri, char *hostname, char *path, int *port);
 void build_http_header(char *http_header, char *hostname, char *path, int port, rio_t *client_rio);
 int connect_endServer(char *hostname, int port, char *http_header);
 
-// cache function
-void cache_init();
-int cache_find(char *url);
-void cache_uri(char *uri, char *buf);
-
-void readerPre(int i);
-void readerAfter(int i);
-
-typedef struct 
-{
-  char cache_obj[MAX_OBJECT_SIZE];
-  char cache_url[MAXLINE];
-  int LRU;
-  int isEmpty;
-
-  int readCnt;  // count of readers
-  sem_t wmutex;  // protects accesses to cache
-  sem_t rdcntmutex;  // protects accesses to readcnt
-}cache_block;
-
-
-typedef struct
-{
-  cache_block cacheobjs[CACHE_OBJS_COUNT];  // ten cache blocks
-  int cache_num;
-}Cache;
-
-Cache cache;
-
-
 int main(int argc, char **argv) {
   int listenfd, connfd;
   socklen_t clientlen;
@@ -68,14 +33,12 @@ int main(int argc, char **argv) {
   pthread_t tid;
   struct sockaddr_storage clientaddr;
 
-  cache_init();
-
   if (argc != 2) {
     // fprintf: 출력을 파일에다 씀. strerr: 파일 포인터
     fprintf(stderr, "usage: %s <port> \n", argv[0]);
     exit(1);  // exit(1): 에러 시 강제 종료
   }
-  Signal(SIGPIPE, SIG_IGN);
+
   listenfd = Open_listenfd(argv[1]);
   while (1) {
     clientlen = sizeof(clientaddr);
@@ -97,8 +60,8 @@ int main(int argc, char **argv) {
   return 0;
 }
 
-void *thread(void *vargsp) {
-  int connfd = (int)vargsp;
+void *thread(void *vargs) {
+  int connfd = (int)vargs;
   Pthread_detach(pthread_self());
   doit(connfd);
   Close(connfd);
@@ -124,19 +87,6 @@ void doit(int connfd) {
     return;
   }
   
-  char url_store[100];
-  strcpy(url_store, uri);
-
-  // the url is cached?
-  int cache_index;
-  // in cache then return the cache content
-  if ((cache_index=cache_find(url_store)) != -1) {
-    readerPre(cache_index);
-    Rio_writen(connfd, cache.cacheobjs[cache_index].cache_obj, strlen(cache.cacheobjs[cache_index].cache_obj));
-    readerAfter(cache_index);
-    return;
-  }
-  
   // parse the uri to get hostname, file path, port
   parse_uri(uri, hostname, path, &port);
 
@@ -156,22 +106,12 @@ void doit(int connfd) {
   Rio_writen(end_serverfd, endserver_http_header, strlen(endserver_http_header));
 
   // recieve message from end server and send to the client
-  char cachebuf[MAX_OBJECT_SIZE];
-  int sizebuf = 0;
   size_t n;
   while ((n=Rio_readlineb(&server_rio, buf, MAXLINE)) != 0) {
-    // printf("proxy received %ld bytes, then send\n", n);
-    sizebuf += n;
-    if (sizebuf < MAX_OBJECT_SIZE)
-      strcat(cachebuf, buf);
+    printf("proxy received %ld bytes, then send\n", n);
     Rio_writen(connfd, buf, n);
   }
   Close(end_serverfd);
-
-  // store it
-  if (sizebuf < MAX_OBJECT_SIZE) {
-    cache_uri(url_store, cachebuf);
-  }
 }
 
 void build_http_header(char *http_header, char *hostname, char *path, int port, rio_t *client_rio) {
@@ -211,7 +151,7 @@ void build_http_header(char *http_header, char *hostname, char *path, int port, 
 }
 
 // Connect to the end server
-inline int connect_endServer(char *hostname, int port, char *http_header) {
+int connect_endServer(char *hostname, int port, char *http_header) {
   char portStr[100];
   sprintf(portStr, "%d", port);
   return Open_clientfd(hostname, portStr);
@@ -242,114 +182,4 @@ void parse_uri(char *uri, char *hostname, char *path, int *port) {
     }
   }
   return;
-}
-
-void cache_init() {
-  cache.cache_num = 0;
-  int i;
-  for (i=0; i<CACHE_OBJS_COUNT; i++) {
-    cache.cacheobjs[i].LRU = 0;
-    cache.cacheobjs[i].isEmpty = 1;
-
-    // Sem_init 첫 번째 인자: 초기화할 세마포어의 포인터
-    // 두 번째: 0 - 쓰레드들끼리 세마포어 공유, 그 외 - 프로세스 간 공유
-    // 세 번째: 초기 값
-    Sem_init(&cache.cacheobjs[i].wmutex, 0, 1);
-    Sem_init(&cache.cacheobjs[i].rdcntmutex, 0, 1);
-
-    cache.cacheobjs[i].readCnt = 0;
-  }
-}
-
-void readerPre(int i) {
-  P(&cache.cacheobjs[i].rdcntmutex);
-  cache.cacheobjs[i].readCnt++;
-  if (cache.cacheobjs[i].readCnt == 1)
-    P(&cache.cacheobjs[i].wmutex);
-  V(&cache.cacheobjs[i].rdcntmutex);
-}
-
-void readerAfter(int i) {
-  P(&cache.cacheobjs[i].rdcntmutex);
-  cache.cacheobjs[i].readCnt--;
-  if (cache.cacheobjs[i].readCnt == 0)
-    V(&cache.cacheobjs[i].wmutex);
-  V(&cache.cacheobjs[i].rdcntmutex);
-}
-
-int cache_find(char *url) {
-  int i;
-  for (i=0; i<CACHE_OBJS_COUNT; i++) {
-    readerPre(i);
-    if ((cache.cacheobjs[i].isEmpty == 0) && (strcmp(url, cache.cacheobjs[i].cache_url) == 0))
-      break;
-    readerAfter(i);
-  }
-  if (i >= CACHE_OBJS_COUNT)
-    return -1;
-  return i;
-}
-
-int cache_eviction() {
-  int min = LRU_MAGIC_NUMBER;
-  int minindex = 0;
-  int i;
-  for (i=0; i<CACHE_OBJS_COUNT; i++) {
-    readerPre(i);
-    if (cache.cacheobjs[i].isEmpty == 1) {
-      minindex = i;
-      readerAfter(i);
-      break;
-    }
-    if (cache.cacheobjs[i].LRU < min) {
-      minindex = i;
-      min = cache.cacheobjs[i].LRU;
-      readerAfter(i);
-      continue;
-    }
-    readerAfter(i);
-  }
-  return minindex;
-}
-
-void writePre(int i) {
-  P(&cache.cacheobjs[i].wmutex);
-}
-
-void writeAfter(int i) {
-  V(&cache.cacheobjs[i].wmutex);
-}
-
-// update the LRU number except the new cache one
-void cache_LRU(int index) {
-  int i;
-  for (i=0; i<index; i++) {
-    writePre(i);
-    if (cache.cacheobjs[i].isEmpty == 0 && i != index)
-      cache.cacheobjs[i].LRU--;
-    writeAfter(i);
-  }
-  i++;
-  for (i; i<CACHE_OBJS_COUNT; i++) {
-    writePre(i);
-    if (cache.cacheobjs[i].isEmpty == 0 && i != index) {
-      cache.cacheobjs[i].LRU--;
-    }
-    writeAfter(i);
-  }
-}
-
-// cache the uri and content in cache
-void cache_uri(char *uri, char *buf) {
-  int i = cache_eviction();
-  
-  writePre(i);
-
-  strcpy(cache.cacheobjs[i].cache_obj, buf);
-  strcpy(cache.cacheobjs[i].cache_url, uri);
-  cache.cacheobjs[i].isEmpty = 0;
-  cache.cacheobjs[i].LRU = LRU_MAGIC_NUMBER;
-  cache_LRU(i);
-
-  writeAfter(i);
 }
